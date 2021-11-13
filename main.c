@@ -116,6 +116,22 @@ typedef struct
     int type;
 } file_t;
 
+int list_comp(const void *a, const void *b)
+{
+    file_t *file_a = (file_t *)a;
+    file_t *file_b = (file_t *)b;
+
+    if (file_a->type == DT_DIR && file_b->type != DT_DIR)
+    {
+        return -1;
+    }
+    if (file_a->type != DT_DIR && file_b->type == DT_DIR)
+    {
+        return 1;
+    }
+    return strcmp(file_a->filename, file_b->filename);
+}
+
 file_t *list_files(const char *path, int *numentries)
 {
     char *actualpath = malloc(strlen(path) + 6);
@@ -149,6 +165,10 @@ file_t *list_files(const char *path, int *numentries)
     }
 
     *numentries = count;
+    if (count > 0 && files)
+    {
+        qsort(files, count, sizeof(file_t), &list_comp);
+    }
     return files;
 }
 
