@@ -93,9 +93,7 @@ audiothread_instructions_t * play(char *filename)
 {
     audiothread_instructions_t *inst = malloc(sizeof(audiothread_instructions_t));
     memset(inst, 0, sizeof(audiothread_instructions_t));
-
-    strcpy(inst->filename, "rom:/");
-    strcat(inst->filename, filename);
+    strcpy(inst->filename, filename);
 
     inst->thread = thread_create("audio", &audiothread_main, inst);
     thread_priority(inst->thread, 1);
@@ -134,11 +132,7 @@ int list_comp(const void *a, const void *b)
 
 file_t *list_files(const char *path, int *numentries)
 {
-    char *actualpath = malloc(strlen(path) + 6);
-    strcpy(actualpath, "rom:/");
-    strcat(actualpath, path);
-
-    DIR *dir = opendir(actualpath);
+    DIR *dir = opendir(path);
 
     int count = 0;
     file_t *files = 0;
@@ -190,7 +184,7 @@ void main()
 
     // Set up our root directory.
     char rootpath[1024];
-    strcpy(rootpath, "/");
+    strcpy(rootpath, "rom://");
 
     int filecount = 0;
     file_t *files = list_files(rootpath, &filecount);
@@ -233,29 +227,38 @@ void main()
         {
             if (files[cursor].type == DT_DIR)
             {
-                // TODO
+                // Enter directory.
+                char filename[1024];
+                strcpy(filename, rootpath);
+                strcat(filename, "/");
+                strcat(filename, files[cursor].filename);
+                realpath(filename, rootpath);
+
+                // List it.
+                free(files);
+                files = list_files(rootpath, &filecount);
+                top = 0;
+                cursor = 0;
             }
             else
             {
                 // Play file.
                 char filename[1024];
                 strcpy(filename, rootpath);
-                if (filename[strlen(filename) - 1] != '/')
-                {
-                    strcat(filename, "/");
-                }
+                strcat(filename, "/");
                 strcat(filename, files[cursor].filename);
 
-                char normname[1024];
-                // TODO: Need to implement realpath()
-                // realpath(filename, normname);
-                strcpy(normname, filename);
+                char *realname = realpath(filename, 0);
 
                 if (instructions)
                 {
                     stop(instructions);
                 }
-                instructions = play(normname);
+                if (realname)
+                {
+                    instructions = play(realname);
+                    free(realname);
+                }
             }
         }
 
@@ -306,7 +309,7 @@ void main()
         }
 
         // Display current directory.
-        video_draw_debug_text(20, 20 + (8 * 5), rgb(128, 255, 128), rootpath);
+        video_draw_debug_text(20, 20 + (8 * 5), rgb(128, 255, 128), rootpath + 5);
 
         for (int i = 0; i < numlines; i++)
         {
