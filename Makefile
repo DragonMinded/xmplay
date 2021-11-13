@@ -21,6 +21,7 @@ include ${NAOMI_BASE}/tools/Makefile.base
 
 # Provide a rule to build our ROM FS.
 build/romfs.bin: romfs/ ${ROMFSGEN_FILE}
+	mkdir -p romfs/
 	${ROMFSGEN} $@ $<
 
 # Provide the top-level ROM creation target for this binary.
