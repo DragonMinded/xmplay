@@ -10,6 +10,7 @@
 #include <naomi/thread.h>
 #include <naomi/interrupt.h>
 #include <naomi/romfs.h>
+#include <naomi/timer.h>
 #include <xmp.h>
 
 #define BUFSIZE 8192
@@ -166,6 +167,58 @@ file_t *list_files(const char *path, int *numentries)
     return files;
 }
 
+#define REPEAT_INITIAL_DELAY 500000
+#define REPEAT_SUBSEQUENT_DELAY 25000
+
+unsigned int repeat(unsigned int cur_state, int *repeat_count)
+{
+    // A held button will "repeat" itself 40x a second after a 1/2 second hold delay.
+    if (*repeat_count < 0)
+    {
+        // If we have never pushed this button, don't try repeating
+        // if it happened to be held.
+        return 0;
+    }
+
+    if (cur_state == 0)
+    {
+        // Button isn't held, no repeats.
+        timer_stop(*repeat_count);
+        *repeat_count = -1;
+        return 0;
+    }
+
+    if (timer_left(*repeat_count) == 0)
+    {
+        // We should restart this timer with a shorter delay
+        // because we're in a repeat zone.
+        timer_stop(*repeat_count);
+        *repeat_count = timer_start(REPEAT_SUBSEQUENT_DELAY);
+        return 1;
+    }
+
+    // Not currently being repeated.
+    return 0;
+}
+
+void repeat_init(unsigned int pushed_state, int *repeat_count)
+{
+    if (pushed_state == 0)
+    {
+        // Haven't pushed the button yet.
+        return;
+    }
+
+    // Clear out old timer if needed.
+    if (*repeat_count >= 0)
+    {
+        timer_stop(*repeat_count);
+    }
+
+    // Set up a half-second timer for our first repeat.
+    *repeat_count = timer_start(REPEAT_INITIAL_DELAY);
+}
+
 void main()
 {
     // Get settings so we know how many controls to read.
@@ -195,14 +248,19 @@ void main()
     int numlines = ((video_height() - 40) / 8) - 7;
     int cursor = 0;
     int top = 0;
+    int repeats[4] = { -1, -1, -1, -1 };
     while ( 1 )
     {
         // Grab inputs.
         maple_poll_buttons();
         jvs_buttons_t pressed = maple_buttons_pressed();
+        jvs_buttons_t held = maple_buttons_held();
 
         if (pressed.player1.up || (settings.system.players >= 2 && pressed.player2.up))
         {
+            repeat_init(pressed.player1.up, &repeats[0]);
+            repeat_init(pressed.player2.up, &repeats[1]);
+
             if (cursor > 0)
             {
                 cursor--;
@@ -214,6 +272,9 @@ void main()
         }
         else if (pressed.player1.down || (settings.system.players >= 2 && pressed.player2.down))
         {
+            repeat_init(pressed.player1.down, &repeats[2]);
+            repeat_init(pressed.player2.down, &repeats[3]);
+
             if (cursor < (filecount - 1))
             {
                 cursor++;
@@ -223,7 +284,30 @@ void main()
                 top = cursor - (numlines - 1);
             }
         }
-        else if (pressed.player1.start || (settings.system.players >= 2 && pressed.player2.start))
+        else if (repeat(held.player1.up, &repeats[0]) || (settings.system.players >= 2 && repeat(held.player2.up, &repeats[1])))
+        {
+            if (cursor > 0)
+            {
+                cursor--;
+            }
+            if (cursor < top)
+            {
+                top = cursor;
+            }
+        }
+        else if (repeat(held.player1.down, &repeats[2]) || (settings.system.players >= 2 && repeat(held.player2.down, &repeats[3])))
+        {
+            if (cursor < (filecount - 1))
+            {
+                cursor++;
+            }
+            if (cursor >= (top + numlines))
+            {
+                top = cursor - (numlines - 1);
+            }
+        }
+
+        if (pressed.player1.start || (settings.system.players >= 2 && pressed.player2.start))
         {
             if (files[cursor].type == DT_DIR)
             {
