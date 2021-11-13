@@ -8,3 +8,4 @@ TODOs
 
  - Ability to enter/leave directories to choose files within them.
  - Use realpath() once it is in the libnaomi stdlib.
+ - Hold up/down and get scrolling without tapping a billion times.
