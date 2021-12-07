@@ -57,13 +57,18 @@ void *audiothread_main(void *param)
         while (xmp_play_frame(ctx) == 0 && instructions->exit == 0)
         {
             xmp_get_frame_info(ctx, &fi);
-            unsigned int numsamples = fi.buffer_size / 4;
+            int numsamples = fi.buffer_size / 4;
             uint32_t *samples = (uint32_t *)fi.buffer;
 
             ATOMIC(sprintf(instructions->position, "%3d/%3d %3d/%3d", fi.pos, mi.mod->len, fi.row, fi.num_rows));
             while (numsamples > 0)
             {
-                unsigned int actual_written = audio_write_stereo_data(samples, numsamples);
+                int actual_written = audio_write_stereo_data(samples, numsamples);
+                if (actual_written < 0)
+                {
+                    instructions->error = 3;
+                    break;
+                }
                 if (actual_written < numsamples)
                 {
                     numsamples -= actual_written;
