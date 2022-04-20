@@ -240,6 +240,7 @@ void stop(audiothread_instructions_t *inst)
 {
     inst->exit = 1;
     thread_join(inst->thread);
+    thread_destroy(inst->thread);
     free(inst);
 }
 
