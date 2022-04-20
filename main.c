@@ -12,6 +12,7 @@
 #include <naomi/romfs.h>
 #include <naomi/timer.h>
 #include <xmp.h>
+#include <timidity.h>
 
 #define BUFSIZE 8192
 #define SAMPLERATE 44100
@@ -27,7 +28,7 @@ typedef struct
     uint32_t thread;
 } audiothread_instructions_t;
 
-void *audiothread_main(void *param)
+void *audiothread_xmp(void *param)
 {
     audiothread_instructions_t *instructions = (audiothread_instructions_t *)param;
 
@@ -95,13 +96,141 @@ void *audiothread_main(void *param)
     return 0;
 }
 
+void *audiothread_timidity(void *param)
+{
+    audiothread_instructions_t *instructions = (audiothread_instructions_t *)param;
+
+    if (mid_init ("rom://timidity/timidity.cfg") < 0)
+    {
+        instructions->error = 1;
+        return 0;
+    }
+
+    MidIStream *stream = mid_istream_open_file (instructions->filename);
+    if (stream == NULL)
+    {
+        mid_exit();
+        instructions->error = 2;
+    }
+    else
+    {
+        MidSongOptions options;
+        options.rate = SAMPLERATE;
+        options.format = MID_AUDIO_S16LSB;
+        options.channels = 2;
+        options.buffer_size = BUFSIZE / 4;
+
+        MidSong *song = mid_song_load (stream, &options);
+        mid_istream_close (stream);
+
+        if (song == NULL)
+        {
+            instructions->error = 3;
+        }
+        else
+        {
+            uint32_t *buffer = malloc(BUFSIZE);
+
+            uint32_t total_time = mid_song_get_total_time(song);
+            char *title = mid_song_get_meta (song, MID_SONG_TEXT);
+
+            ATOMIC(strcpy(instructions->modulename, title == NULL ? "no song title" : title));
+            ATOMIC(strcpy(instructions->tracker, "midi"));
+
+            mid_song_set_volume(song, 100);
+            mid_song_start(song);
+
+            audio_register_ringbuffer(AUDIO_FORMAT_16BIT, SAMPLERATE, BUFSIZE);
+
+            int bytes_read;
+            while (instructions->exit == 0 && (bytes_read = mid_song_read_wave(song, (void *)buffer, BUFSIZE)))
+            {
+                int numsamples = bytes_read / 4;
+                uint32_t *samples = buffer;
+
+                uint32_t current_time = mid_song_get_time(song);
+                ATOMIC(sprintf(instructions->position, "%lu/%lu", current_time / 1000, total_time / 1000));
+                while (numsamples > 0)
+                {
+                    int actual_written = audio_write_stereo_data(samples, numsamples);
+                    if (actual_written < 0)
+                    {
+                        instructions->error = 3;
+                        break;
+                    }
+                    if (actual_written < numsamples)
+                    {
+                        numsamples -= actual_written;
+                        samples += actual_written;
+
+                        // Sleep for the time it takes to play half our buffer so we can wake up and
+                        // fill it again.
+                        thread_sleep((int)(1000000.0 * (((float)BUFSIZE / 4.0) / (float)SAMPLERATE)));
+                    }
+                    else
+                    {
+                        numsamples = 0;
+                    }
+                }
+            }
+
+            audio_unregister_ringbuffer();
+
+            mid_song_free (song);
+
+            free(buffer);
+        }
+    }
+
+    mid_exit();
+    return 0;
+}
+
+char lower(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+    {
+        return (c - 'A') + 'a';
+    }
+
+    return c;
+}
+
 audiothread_instructions_t * play(char *filename)
 {
     audiothread_instructions_t *inst = malloc(sizeof(audiothread_instructions_t));
     memset(inst, 0, sizeof(audiothread_instructions_t));
     strcpy(inst->filename, filename);
 
-    inst->thread = thread_create("audio", &audiothread_main, inst);
+    // Figure out the extension for this file.
+    char ext[32] = { 0 };
+    int extlen = 0;
+    int fnamelen = strlen(filename);
+    while (extlen < sizeof(ext) - 1)
+    {
+        int pos = fnamelen - (extlen + 1);
+        if (pos < 0)
+        {
+            break;
+        }
+
+        if (filename[pos] == '.')
+        {
+            break;
+        }
+
+        ext[extlen++] = lower(filename[pos]);
+        ext[extlen] = 0;
+    }
+
+    if (strcmp(ext, "dim") == 0)
+    {
+        inst->thread = thread_create("audio", &audiothread_timidity, inst);
+    }
+    else
+    {
+        inst->thread = thread_create("audio", &audiothread_xmp, inst);
+    }
     thread_priority(inst->thread, 1);
     thread_start(inst->thread);
     return inst;
@@ -140,6 +269,7 @@ file_t *list_files(const char *path, int *numentries)
 {
     DIR *dir = opendir(path);
 
+    int is_root = strcmp(path, "rom://") == 0;
     int count = 0;
     file_t *files = 0;
     while (1)
@@ -148,6 +278,22 @@ file_t *list_files(const char *path, int *numentries)
         if (direntp == 0)
         {
             break;
+        }
+
+        if (is_root && direntp->d_type == DT_DIR && strcmp(direntp->d_name, "timidity") == 0)
+        {
+            // Hide timidity directory for aesthetic reasons.
+            continue;
+        }
+        if (is_root && direntp->d_type == DT_DIR && strcmp(direntp->d_name, "..") == 0)
+        {
+            // Hide up directory on root.
+            continue;
+        }
+        if (direntp->d_type == DT_DIR && strcmp(direntp->d_name, ".") == 0)
+        {
+            // Hide current directory everywhere.
+            continue;
         }
 
         count++;

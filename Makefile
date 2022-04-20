@@ -10,8 +10,8 @@ all: xmplay.bin
 # these files exist.
 SRCS += main.c
 
-# Make sure to link with libxmp
-LIBS += -lxmp
+# Make sure to link with libxmp and libtimidity
+LIBS += -lxmp -ltimidity
 
 # We want a different serial for whatever reason.
 SERIAL = BXM0
