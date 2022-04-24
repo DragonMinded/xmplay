@@ -311,6 +311,9 @@ file_t *list_files(const char *path, int *numentries)
         files[count - 1].type = direntp->d_type;
     }
 
+    // Don't forget to close the directory!
+    closedir(dir);
+
     *numentries = count;
     if (count > 0 && files)
     {
@@ -498,6 +501,10 @@ void main()
             }
         }
 
+        // Stop flickering by not having the instructions bits updated while we are
+        // drawing them.
+        uint32_t old_irq = irq_disable();
+
         if (instructions)
         {
             if (instructions->error)
@@ -543,6 +550,8 @@ void main()
                 "N/A"
             );
         }
+
+        irq_restore(old_irq);
 
         // Display current directory.
         video_draw_debug_text(20, 20 + (8 * 5), rgb(128, 255, 128), rootpath + 5);
