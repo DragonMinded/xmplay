@@ -576,8 +576,12 @@ void main()
             video_draw_debug_text(20, 20 + (8 * (7 + i)), rgb(255, 255, 255), "%c", fileoff == cursor ? '>' : ' ');
         }
 
-        // Wait for vblank and draw it!
+        // Wait for vblank and draw it! We do this polling-style instead of interrupt style
+        // because for some reason it flickers with the latter. Not sure why, but I suspect
+        // that the audio thread priorities are wack. However, its not worth it to track down.
+        old_irq = irq_disable();
         video_display_on_vblank();
+        irq_restore(old_irq);
     }
 }
 
