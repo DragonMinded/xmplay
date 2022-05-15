@@ -503,55 +503,53 @@ void main()
 
         // Stop flickering by not having the instructions bits updated while we are
         // drawing them.
-        uint32_t old_irq = irq_disable();
-
-        if (instructions)
-        {
-            if (instructions->error)
+        ATOMIC({
+            if (instructions)
             {
-                // Display info about error.
+                if (instructions->error)
+                {
+                    // Display info about error.
+                    video_draw_debug_text(
+                        20,
+                        20,
+                        rgb(255, 255, 255),
+                        "Filename: %s\nName: %s\nTracker: %s\nPlayback Position: %s",
+                        instructions->filename + 5,
+                        "<<cannot play file>>",
+                        "N/A",
+                        "N/A"
+                    );
+                }
+                else
+                {
+                    // Display info about playback.
+                    video_draw_debug_text(
+                        20,
+                        20,
+                        rgb(255, 255, 255),
+                        "Filename: %s\nName: %s\nTracker: %s\nPlayback Position: %s",
+                        instructions->filename + 5,
+                        instructions->modulename,
+                        instructions->tracker,
+                        instructions->position
+                    );
+                }
+            }
+            else
+            {
+                // Display nothing.
                 video_draw_debug_text(
                     20,
                     20,
                     rgb(255, 255, 255),
                     "Filename: %s\nName: %s\nTracker: %s\nPlayback Position: %s",
-                    instructions->filename + 5,
-                    "<<cannot play file>>",
+                    "<<nothing>>",
+                    "N/A",
                     "N/A",
                     "N/A"
                 );
             }
-            else
-            {
-                // Display info about playback.
-                video_draw_debug_text(
-                    20,
-                    20,
-                    rgb(255, 255, 255),
-                    "Filename: %s\nName: %s\nTracker: %s\nPlayback Position: %s",
-                    instructions->filename + 5,
-                    instructions->modulename,
-                    instructions->tracker,
-                    instructions->position
-                );
-            }
-        }
-        else
-        {
-            // Display nothing.
-            video_draw_debug_text(
-                20,
-                20,
-                rgb(255, 255, 255),
-                "Filename: %s\nName: %s\nTracker: %s\nPlayback Position: %s",
-                "<<nothing>>",
-                "N/A",
-                "N/A",
-                "N/A"
-            );
-        }
-
-        irq_restore(old_irq);
+        });
 
         // Display current directory.
         video_draw_debug_text(20, 20 + (8 * 5), rgb(128, 255, 128), rootpath + 5);
@@ -576,12 +574,8 @@ void main()
             video_draw_debug_text(20, 20 + (8 * (7 + i)), rgb(255, 255, 255), "%c", fileoff == cursor ? '>' : ' ');
         }
 
-        // Wait for vblank and draw it! We do this polling-style instead of interrupt style
-        // because for some reason it flickers with the latter. Not sure why, but I suspect
-        // that the audio thread priorities are wack. However, its not worth it to track down.
-        old_irq = irq_disable();
+        // Wait for vblank and draw it!
         video_display_on_vblank();
-        irq_restore(old_irq);
     }
 }
 
