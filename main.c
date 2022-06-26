@@ -13,6 +13,7 @@
 #include <naomi/timer.h>
 #include <xmp.h>
 #include <timidity.h>
+#include <mpg123.h>
 
 #define BUFSIZE 8192
 #define SAMPLERATE 44100
@@ -186,6 +187,191 @@ void *audiothread_timidity(void *param)
     return 0;
 }
 
+void mpg123_ptr_to_string(void *ptr, char *string, int size)
+{
+    int realsize = mpg123_strlen(ptr, 0);
+    int copysize = realsize > (size - 1) ? (size - 1) : realsize;
+    memcpy(string, ptr, copysize);
+    string[copysize] = 0;
+}
+
+void *audiothread_mpg123(void *param)
+{
+    audiothread_instructions_t *instructions = (audiothread_instructions_t *)param;
+
+    // First, init the base libs.
+    mpg123_init();
+
+    // Now, get a handle and start setting up.
+    int err = 0;
+    mpg123_handle *mh = mpg123_new(NULL, &err);
+
+    if (err != 0)
+    {
+        instructions->error = 1;
+        return 0;
+    }
+
+    // Now, open and get the info from the file.
+    err = mpg123_open(mh, instructions->filename);
+    if (err != MPG123_OK)
+    {
+        mpg123_delete(mh);
+        mpg123_exit();
+        instructions->error = 2;
+        return 0;
+    }
+
+    // Get the info of the file so we can set up streaming for it.
+    long samplerate;
+    int channels;
+    int encoding;
+    err = mpg123_getformat(mh, &samplerate, &channels, &encoding);
+    if (err != MPG123_OK)
+    {
+        mpg123_close(mh);
+        mpg123_delete(mh);
+        mpg123_exit();
+        instructions->error = 3;
+        return 0;
+    }
+
+    // Get the bitrate from the byterate
+    int encbits = mpg123_encsize(encoding) * 8;
+    if (samplerate < 6000 || samplerate > 48000 || (channels != 1 && channels != 2) || (encbits != 8 && encbits != 16))
+    {
+        mpg123_close(mh);
+        mpg123_delete(mh);
+        mpg123_exit();
+        instructions->error = 4;
+        return 0;
+    }
+
+    uint32_t *buffer = malloc(BUFSIZE);
+
+    // Attempt to read ID3 tag to display title.
+    mpg123_id3v1 *v1;
+    mpg123_id3v2 *v2;
+
+    mpg123_scan(mh);
+    int meta = mpg123_meta_check(mh);
+    if(meta & MPG123_ID3 && mpg123_id3(mh, &v1, &v2) == MPG123_OK)
+    {
+        // Because often ID3v2 will be in unicode, favor v1 since we don't have unicode support
+        // for this simple console program.
+        if (v1 != 0)
+        {
+            ATOMIC(sprintf(instructions->modulename, "%s - %s", v1->artist, v1->title));
+        }
+        else if (v2 != 0)
+        {
+            char artist[128];
+            char title[128];
+            mpg123_ptr_to_string(v2->artist, artist, sizeof(artist));
+            mpg123_ptr_to_string(v2->title, title, sizeof(title));
+            ATOMIC(sprintf(instructions->modulename, "%s - %s", artist, title));
+        }
+        else
+        {
+            ATOMIC(strcpy(instructions->modulename, "no song title"));
+        }
+    }
+    else
+    {
+        ATOMIC(strcpy(instructions->modulename, "no song title"));
+    }
+
+    // Attempt to grab the length of the file in frames.
+    off_t total_samples = mpg123_length(mh);
+
+    // No tracker information, we're just a file decoder.
+    ATOMIC(strcpy(instructions->tracker, "mp3"));
+
+    // Finally, based on the file's info, set up the encoding and samplerate.
+    audio_register_ringbuffer(encbits == 16 ? AUDIO_FORMAT_16BIT : AUDIO_FORMAT_8BIT, samplerate, BUFSIZE);
+
+    // Calculate our bytes read->number of samples divisor.
+    int divisor = encbits == 16 ?
+        (channels == 2 ? 4 : 2) :
+        (channels == 2 ? 2 : 1);
+    size_t bytes_read;
+    size_t samples_read = 0;
+    while (instructions->exit == 0 && (mpg123_read(mh, buffer, BUFSIZE, &bytes_read) == MPG123_OK))
+    {
+        int numsamples = bytes_read / divisor;
+
+        // Display the length and current offset.
+        ATOMIC(sprintf(instructions->position, "%lu/%ld", samples_read / samplerate, total_samples / samplerate));
+        samples_read += numsamples;
+
+        if (channels == 2)
+        {
+            uint32_t *samples = buffer;
+            while (numsamples > 0)
+            {
+                int actual_written = audio_write_stereo_data(samples, numsamples);
+                if (actual_written < 0)
+                {
+                    instructions->error = 5;
+                    break;
+                }
+                if (actual_written < numsamples)
+                {
+                    numsamples -= actual_written;
+                    samples += actual_written;
+
+                    // Sleep for the time it takes to play half our buffer so we can wake up and
+                    // fill it again.
+                    thread_sleep((int)(1000000.0 * (((float)BUFSIZE / 4.0) / (float)samplerate)));
+                }
+                else
+                {
+                    numsamples = 0;
+                }
+            }
+        }
+        else
+        {
+            uint16_t *samples = (uint16_t *)buffer;
+            while (numsamples > 0)
+            {
+                int actual_written_left = audio_write_mono_data(AUDIO_CHANNEL_LEFT, samples, numsamples);
+                int actual_written_right = audio_write_mono_data(AUDIO_CHANNEL_RIGHT, samples, numsamples);
+
+                if (actual_written_left != actual_written_right || actual_written_left < 0 || actual_written_right < 0)
+                {
+                    instructions->error = 5;
+                    break;
+                }
+                if (actual_written_left < numsamples)
+                {
+                    numsamples -= actual_written_left;
+                    samples += actual_written_left;
+
+                    // Sleep for the time it takes to play half our buffer so we can wake up and
+                    // fill it again.
+                    thread_sleep((int)(1000000.0 * (((float)BUFSIZE / 4.0) / (float)samplerate)));
+                }
+                else
+                {
+                    numsamples = 0;
+                }
+            }
+        }
+    }
+
+    // Done streaming, don't need the audio streaming interface anymore.
+    audio_unregister_ringbuffer();
+    free(buffer);
+
+    // Also don't need mpg123 anymore.
+    mpg123_close(mh);
+    mpg123_delete(mh);
+    mpg123_exit();
+    return 0;
+}
+
+
 char lower(char c)
 {
     if (c >= 'A' && c <= 'Z')
@@ -226,6 +412,10 @@ audiothread_instructions_t * play(char *filename)
     if (strcmp(ext, "dim") == 0)
     {
         inst->thread = thread_create("audio", &audiothread_timidity, inst);
+    }
+    else if (strcmp(ext, "3pm") == 0)
+    {
+        inst->thread = thread_create("audio", &audiothread_mpg123, inst);
     }
     else
     {

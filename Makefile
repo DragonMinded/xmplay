@@ -10,8 +10,8 @@ all: xmplay.bin
 # these files exist.
 SRCS += main.c
 
-# Make sure to link with libxmp and libtimidity
-LIBS += -lxmp -ltimidity
+# Make sure to link with our sound libs (from libnaomi 3rdparty).
+LIBS += -lxmp -ltimidity -lmpg123
 
 # We want a different serial for whatever reason.
 SERIAL = BXM0
