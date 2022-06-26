@@ -11,7 +11,10 @@ all: xmplay.bin
 SRCS += main.c
 
 # Make sure to link with our sound libs (from libnaomi 3rdparty).
-LIBS += -lxmp -ltimidity -lmpg123
+LIBS += -lxmp -ltimidity -lmpg123 -logg -lvorbis -lvorbisfile
+
+# Unfortunately, libvorbis has warnings generated out of its headers.
+FLAGS += -Wno-unused-variable -Wall
 
 # We want a different serial for whatever reason.
 SERIAL = BXM0

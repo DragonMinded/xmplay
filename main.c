@@ -14,6 +14,8 @@
 #include <xmp.h>
 #include <timidity.h>
 #include <mpg123.h>
+#include <vorbis/codec.h>
+#include <vorbis/vorbisfile.h>
 
 #define BUFSIZE 8192
 #define SAMPLERATE 44100
@@ -247,8 +249,6 @@ void *audiothread_mpg123(void *param)
         return 0;
     }
 
-    uint32_t *buffer = malloc(BUFSIZE);
-
     // Attempt to read ID3 tag to display title.
     mpg123_id3v1 *v1;
     mpg123_id3v2 *v2;
@@ -296,6 +296,8 @@ void *audiothread_mpg123(void *param)
         (channels == 2 ? 2 : 1);
     size_t bytes_read;
     size_t samples_read = 0;
+    uint32_t *buffer = malloc(BUFSIZE);
+
     while (instructions->exit == 0 && (mpg123_read(mh, buffer, BUFSIZE, &bytes_read) == MPG123_OK))
     {
         int numsamples = bytes_read / divisor;
@@ -371,6 +373,176 @@ void *audiothread_mpg123(void *param)
     return 0;
 }
 
+void ov_extract_comment(char *out, int size, char *field, vorbis_comment *metadata)
+{
+    // Make sure we don't have to remember to cap off out if we find no matches.
+    out[0] = 0;
+
+    // We lazily return if the fieldlen is longer than our internal buffer.
+    int fieldlen = strlen(field);
+    if (fieldlen > 127) { return; }
+    strlwr(field);
+
+    for (int i = 0; i < metadata->comments; i++)
+    {
+        if (metadata->comment_lengths[i] < (fieldlen + 1))
+        {
+            // Not enough length for there to be a meaningful comment.
+            continue;
+        }
+        if (metadata->user_comments[i][fieldlen] != '=')
+        {
+            // Couldn't match this anyway.
+            continue;
+        }
+
+        // Grab the field data, case insensitive compare it.
+        char actual[128];
+        memcpy(actual, metadata->user_comments[i], fieldlen);
+        actual[fieldlen] = 0;
+        strlwr(actual);
+
+        if (strcmp(field, actual) == 0)
+        {
+            // Grab everything after the equals.
+            int left = metadata->comment_lengths[i] - (fieldlen + 1);
+            if (left > (size - 1)) { left = size - 1; }
+
+            memcpy(out, &metadata->user_comments[i][fieldlen + 1], left);
+            out[left] = 0;
+            return;
+        }
+    }
+}
+
+void *audiothread_vorbis(void *param)
+{
+    audiothread_instructions_t *instructions = (audiothread_instructions_t *)param;
+
+    // Attempt to load the ogg file.
+    FILE *fp = fopen(instructions->filename, "r");
+    OggVorbis_File vf;
+    if (ov_open(fp, &vf, 0, 0) < 0)
+    {
+        instructions->error = 1;
+        return 0;
+    }
+
+    // Now, get the info from the file.
+    vorbis_info *info = ov_info(&vf, -1);
+    if (info == 0)
+    {
+        ov_clear(&vf);
+        fclose(fp);
+        instructions->error = 2;
+        return 0;
+    }
+
+    if (info->rate < 6000 || info->rate > 48000 || (info->channels != 1 && info->channels != 2))
+    {
+        ov_clear(&vf);
+        fclose(fp);
+        instructions->error = 4;
+        return 0;
+    }
+
+    // Grab artist and title from metadata
+    vorbis_comment *metadata = ov_comment(&vf, -1);
+    if (metadata)
+    {
+        char artist[128];
+        char title[128];
+        ov_extract_comment(artist, sizeof(artist), "artist", metadata);
+        ov_extract_comment(title, sizeof(title), "title", metadata);
+        ATOMIC(sprintf(instructions->modulename, "%s - %s", artist, title));
+    }
+    else
+    {
+        ATOMIC(strcpy(instructions->modulename, "no song title"));
+    }
+
+    // Always the same thing here.
+    ATOMIC(strcpy(instructions->tracker, "ogg"));
+
+    // Finally, based on the file's info, set up the encoding and samplerate.
+    audio_register_ringbuffer(AUDIO_FORMAT_16BIT, info->rate, BUFSIZE);
+
+    // Now, start streaming the decoded data.
+    int bytes_read;
+    int bitstream;
+    uint32_t *buffer = malloc(BUFSIZE);
+    while (instructions->exit == 0 && (bytes_read = ov_read(&vf, (char *)buffer, BUFSIZE, 0, 2, 1, &bitstream)) > 0)
+    {
+        int numsamples = bytes_read / (2 * info->channels);
+
+        // Display the length and current offset.
+        ATOMIC(sprintf(instructions->position, "%d/%d", (int)ov_time_tell(&vf), (int)ov_time_total(&vf, -1)));
+
+        if (info->channels == 2)
+        {
+            uint32_t *samples = buffer;
+            while (numsamples > 0)
+            {
+                int actual_written = audio_write_stereo_data(samples, numsamples);
+                if (actual_written < 0)
+                {
+                    instructions->error = 5;
+                    break;
+                }
+                if (actual_written < numsamples)
+                {
+                    numsamples -= actual_written;
+                    samples += actual_written;
+
+                    // Sleep for the time it takes to play half our buffer so we can wake up and
+                    // fill it again.
+                    thread_sleep((int)(1000000.0 * (((float)BUFSIZE / 4.0) / (float)info->rate)));
+                }
+                else
+                {
+                    numsamples = 0;
+                }
+            }
+        }
+        else
+        {
+            uint16_t *samples = (uint16_t *)buffer;
+            while (numsamples > 0)
+            {
+                int actual_written_left = audio_write_mono_data(AUDIO_CHANNEL_LEFT, samples, numsamples);
+                int actual_written_right = audio_write_mono_data(AUDIO_CHANNEL_RIGHT, samples, numsamples);
+
+                if (actual_written_left != actual_written_right || actual_written_left < 0 || actual_written_right < 0)
+                {
+                    instructions->error = 5;
+                    break;
+                }
+                if (actual_written_left < numsamples)
+                {
+                    numsamples -= actual_written_left;
+                    samples += actual_written_left;
+
+                    // Sleep for the time it takes to play half our buffer so we can wake up and
+                    // fill it again.
+                    thread_sleep((int)(1000000.0 * (((float)BUFSIZE / 4.0) / (float)info->rate)));
+                }
+                else
+                {
+                    numsamples = 0;
+                }
+            }
+        }
+    }
+
+    // Done streaming, don't need the audio streaming interface anymore.
+    audio_unregister_ringbuffer();
+    free(buffer);
+
+    // Also don't need ogg anymore.
+    ov_clear(&vf);
+    fclose(fp);
+    return 0;
+}
 
 char lower(char c)
 {
@@ -416,6 +588,10 @@ audiothread_instructions_t * play(char *filename)
     else if (strcmp(ext, "3pm") == 0)
     {
         inst->thread = thread_create("audio", &audiothread_mpg123, inst);
+    }
+    else if (strcmp(ext, "ggo") == 0)
+    {
+        inst->thread = thread_create("audio", &audiothread_vorbis, inst);
     }
     else
     {
